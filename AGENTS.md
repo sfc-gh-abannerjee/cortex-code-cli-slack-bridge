@@ -15,6 +15,7 @@ cortex_slack_bridge/
   notify.py          ← Notification helpers
 bin/
   coco-bridge        ← CLI entrypoint (send, history, setup-keychain, clear-keychain, pause, resume, stop)
+  coco-browser       ← Persistent browser session CLI (navigate/evaluate/text/screenshot chain)
 skill/
   SKILL.md           ← Cortex Code skill definition (must be copied to ~/.snowflake/cortex/skills/slack-bridge/)
 config.json.example  ← Template for Slack tokens
@@ -42,6 +43,34 @@ config.json.example  ← Template for Slack tokens
 | `pause` | Switch to 5-min heartbeat cron |
 | `resume` | Restore normal 1-min double-read cron |
 | `stop` | Clear inbox + delete cron entirely |
+
+## coco-browser CLI Commands
+
+`cortex browser` CLI starts a fresh Playwright MCP server on every invocation (hardcoded in the cortex binary), so page state is never shared between commands. `coco-browser` fixes this by running cortex's built-in `browser_daemon` as a persistent background process and routing all commands to it over a Unix socket.
+
+Data dir: `~/.cortex-slack-bridge/browser/`
+
+| Command | What it does |
+|---|---|
+| `start` | Start the browser daemon (persists across commands) |
+| `stop` | Stop the daemon |
+| `status` | Check if daemon is running |
+| `navigate <url>` | Navigate to URL |
+| `evaluate <js>` | Evaluate JavaScript in page context |
+| `text` | Get full visible page text |
+| `screenshot [path]` | Save screenshot (default: `~/.cortex-slack-bridge/browser/screenshot.png`) |
+| `snapshot` | Get accessibility tree |
+| `logs` | Tail the daemon log |
+
+**Usage pattern:**
+```bash
+coco-browser start
+coco-browser navigate "https://example.com"
+coco-browser evaluate "document.title"   # sees the navigated page
+coco-browser text                         # full page text
+coco-browser screenshot /tmp/page.png
+coco-browser stop
+```
 
 ## Slack App
 

@@ -1,0 +1,296 @@
+#!/usr/bin/env bash
+# coco-browser — Persistent browser session for Cortex Code
+#
+# Each "cortex browser" CLI call starts its own isolated Playwright server that
+# dies when the command exits, so page state is never shared between calls.
+# coco-browser fixes this by running cortex's built-in browser_daemon as a
+# persistent background process and routing commands to it via Unix socket.
+#
+# Usage:
+#   coco-browser start              Start the browser daemon
+#   coco-browser stop               Stop the browser daemon
+#   coco-browser status             Check if daemon is running
+#   coco-browser navigate <url>     Navigate to URL (persists across commands)
+#   coco-browser evaluate <js>      Evaluate JavaScript in page context
+#   coco-browser text               Get visible page text (full body)
+#   coco-browser screenshot [path]  Take screenshot
+#   coco-browser snapshot           Get accessibility tree
+#   coco-browser logs               Tail the daemon log
+
+set -euo pipefail
+
+BROWSER_DIR="$HOME/.cortex-slack-bridge/browser"
+PID_FILE="$BROWSER_DIR/default.pid"
+LOG_FILE="$BROWSER_DIR/browser.log"
+SOCKET_PATH="$BROWSER_DIR/default.sock"
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+_ensure_dir() { mkdir -p "$BROWSER_DIR"; }
+
+# Resolve the browser_daemon path from the active cortex installation.
+# The cortex binary is a versioned symlink; following it gives us the dir.
+_find_daemon() {
+    local cortex_bin
+    cortex_bin=$(which cortex 2>/dev/null) || {
+        echo "cortex not found in PATH" >&2; return 1
+    }
+    local cortex_real
+    cortex_real=$(python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" "$cortex_bin")
+    local daemon
+    daemon="$(dirname "$cortex_real")/browser_daemon/dist/daemon.js"
+    if [[ ! -f "$daemon" ]]; then
+        echo "browser_daemon not found at: $daemon" >&2
+        return 1
+    fi
+    echo "$daemon"
+}
+
+# Check whether the daemon process is alive.
+_is_running() {
+    if [[ -f "$PID_FILE" ]]; then
+        local pid
+        pid=$(<"$PID_FILE")
+        if kill -0 "$pid" 2>/dev/null; then
+            return 0
+        fi
+        # Stale PID file
+        rm -f "$PID_FILE"
+    fi
+    return 1
+}
+
+# JSON-encode a single string value safely.
+_json_str() {
+    python3 -c "import json,sys; print(json.dumps(sys.argv[1]))" "$1"
+}
+
+# Send one JSON command to the daemon via Unix socket.
+# Pass command JSON as BROWSER_CMD env var to avoid shell quoting hazards.
+# Usage: _send_cmd '{"id":"1","action":"navigate","url":"..."}' [timeout_ms]
+_send_cmd() {
+    local cmd_json="$1"
+    local timeout_ms="${2:-30000}"
+    if ! _is_running; then
+        echo "Browser daemon is not running. Run: coco-browser start" >&2
+        exit 1
+    fi
+    BROWSER_CMD="$cmd_json" node -e "
+const net = require('net');
+const cmd = process.env.BROWSER_CMD;
+const s   = net.createConnection('$SOCKET_PATH');
+let buf = '';
+s.on('connect', () => s.write(cmd + '\n'));
+s.on('data', d => {
+    buf += d.toString();
+    const idx = buf.indexOf('\n');
+    if (idx !== -1) {
+        const line = buf.substring(0, idx).trim();
+        if (line) { process.stdout.write(line + '\n'); s.destroy(); process.exit(0); }
+    }
+});
+s.on('error', e => { process.stderr.write('Socket error: ' + e.message + '\n'); process.exit(1); });
+setTimeout(() => {
+    process.stderr.write('Timeout after ${timeout_ms}ms\n'); s.destroy(); process.exit(1);
+}, $timeout_ms);
+"
+}
+
+# Parse a success response and print a field, or error and exit.
+# Usage: echo "$resp" | _parse_field fieldA fieldB ...
+_parse_resp() {
+    local fields="$1"   # comma-separated chain like data.url or data.result
+    node -e "
+const raw = require('fs').readFileSync('/dev/stdin', 'utf8').trim();
+if (!raw) { process.stderr.write('Empty response\n'); process.exit(1); }
+let d;
+try { d = JSON.parse(raw); } catch(e) { process.stderr.write('Bad JSON: ' + raw.substring(0,200) + '\n'); process.exit(1); }
+if (d.error) { process.stderr.write('Error: ' + d.error + '\n'); process.exit(1); }
+const path = '$fields'.split('.');
+let v = d;
+for (const k of path) v = v?.[k];
+if (v === undefined || v === null) {
+    // Print full data as fallback
+    console.log(JSON.stringify(d.data, null, 2));
+} else {
+    console.log(typeof v === 'string' ? v : JSON.stringify(v, null, 2));
+}
+"
+}
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+cmd_start() {
+    _ensure_dir
+    if _is_running; then
+        echo "Browser daemon already running (PID $(<"$PID_FILE"))"
+        return 0
+    fi
+    local daemon
+    daemon=$(_find_daemon)
+    echo "Starting browser daemon..."
+    # The daemon writes its own PID to $BROWSER_DIR/default.pid on startup.
+    AGENT_BROWSER_SOCKET_DIR="$BROWSER_DIR" nohup node "$daemon" >> "$LOG_FILE" 2>&1 &
+    local bg_pid=$!
+    # Wait for daemon to write its PID file and socket
+    local attempts=0
+    while (( attempts < 10 )); do
+        sleep 1
+        (( attempts++ ))
+        if [[ -f "$PID_FILE" ]] && kill -0 "$(<"$PID_FILE")" 2>/dev/null; then
+            echo "Browser daemon started (PID $(<"$PID_FILE"))"
+            echo "Logs: $LOG_FILE"
+            return 0
+        fi
+    done
+    # Fallback: check background PID
+    if kill -0 "$bg_pid" 2>/dev/null; then
+        echo "$bg_pid" > "$PID_FILE"
+        echo "Browser daemon started (PID $bg_pid)"
+        echo "Logs: $LOG_FILE"
+    else
+        echo "Browser daemon failed to start. Check logs:" >&2
+        tail -20 "$LOG_FILE" >&2
+        return 1
+    fi
+}
+
+cmd_stop() {
+    if ! _is_running; then
+        echo "Browser daemon is not running."
+        return 0
+    fi
+    local pid
+    pid=$(<"$PID_FILE")
+    echo "Stopping browser daemon (PID $pid)..."
+    # SIGTERM triggers the daemon's graceful shutdown handler (cleans up socket/PID)
+    kill "$pid" 2>/dev/null || true
+    local attempts=0
+    while (( attempts < 10 )); do
+        sleep 0.5
+        (( attempts++ ))
+        if ! kill -0 "$pid" 2>/dev/null; then
+            rm -f "$PID_FILE" "$SOCKET_PATH"
+            echo "Browser daemon stopped."
+            return 0
+        fi
+    done
+    kill -9 "$pid" 2>/dev/null || true
+    rm -f "$PID_FILE" "$SOCKET_PATH"
+    echo "Browser daemon force-stopped."
+}
+
+cmd_status() {
+    if _is_running; then
+        echo "Browser daemon is running (PID $(<"$PID_FILE"))"
+    else
+        echo "Browser daemon is not running."
+    fi
+}
+
+cmd_navigate() {
+    if [[ $# -lt 1 ]]; then
+        echo "Usage: coco-browser navigate <url>" >&2
+        return 1
+    fi
+    local url="$1"
+    local url_json
+    url_json=$(_json_str "$url")
+    local resp
+    resp=$(_send_cmd "{\"id\":\"nav\",\"action\":\"navigate\",\"url\":$url_json,\"waitUntil\":\"domcontentloaded\"}" 30000)
+    echo "$resp" | node -e "
+const d = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8').trim());
+if (d.error) { process.stderr.write('Error: ' + d.error + '\n'); process.exit(1); }
+console.log('Navigated to:', d.data?.url ?? '?');
+console.log('Title:', d.data?.title ?? '?');
+"
+}
+
+cmd_evaluate() {
+    if [[ $# -lt 1 ]]; then
+        echo "Usage: coco-browser evaluate <javascript>" >&2
+        return 1
+    fi
+    local script="$1"
+    local script_json
+    script_json=$(_json_str "$script")
+    local resp
+    resp=$(_send_cmd "{\"id\":\"eval\",\"action\":\"evaluate\",\"script\":$script_json}")
+    echo "$resp" | _parse_resp "data.result"
+}
+
+cmd_text() {
+    local resp
+    resp=$(_send_cmd '{"id":"text","action":"evaluate","script":"document.body.innerText"}')
+    echo "$resp" | _parse_resp "data.result"
+}
+
+cmd_screenshot() {
+    local path="${1:-$BROWSER_DIR/screenshot.png}"
+    local path_json
+    path_json=$(_json_str "$path")
+    local resp
+    resp=$(_send_cmd "{\"id\":\"shot\",\"action\":\"screenshot\",\"path\":$path_json}" 15000)
+    echo "$resp" | node -e "
+const d = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8').trim());
+if (d.error) { process.stderr.write('Error: ' + d.error + '\n'); process.exit(1); }
+console.log('Screenshot saved:', process.argv[1]);
+" "$path"
+}
+
+cmd_snapshot() {
+    local resp
+    resp=$(_send_cmd '{"id":"snap","action":"snapshot"}')
+    echo "$resp" | node -e "
+const d = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8').trim());
+if (d.error) { process.stderr.write('Error: ' + d.error + '\n'); process.exit(1); }
+const snap = d.data?.snapshot ?? d.data;
+console.log(typeof snap === 'string' ? snap : JSON.stringify(snap, null, 2));
+"
+}
+
+cmd_logs() {
+    if [[ -f "$LOG_FILE" ]]; then
+        tail -f "$LOG_FILE"
+    else
+        echo "No log file yet. Start the daemon first."
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Main dispatch
+# ---------------------------------------------------------------------------
+
+case "${1:-help}" in
+    start)      cmd_start ;;
+    stop)       cmd_stop ;;
+    status)     cmd_status ;;
+    navigate)   shift; cmd_navigate "$@" ;;
+    evaluate)   shift; cmd_evaluate "$@" ;;
+    text)       cmd_text ;;
+    screenshot) shift; cmd_screenshot "${1:-}" ;;
+    snapshot)   cmd_snapshot ;;
+    logs)       cmd_logs ;;
+    help|*)
+        echo "coco-browser — Persistent browser session for Cortex Code"
+        echo ""
+        echo "Commands:"
+        echo "  start              Start the browser daemon"
+        echo "  stop               Stop the browser daemon"
+        echo "  status             Check if daemon is running"
+        echo "  navigate <url>     Navigate to URL (persists across commands)"
+        echo "  evaluate <js>      Evaluate JavaScript in page context"
+        echo "  text               Get visible page text (full body)"
+        echo "  screenshot [path]  Save screenshot (default: ~/.cortex-slack-bridge/browser/screenshot.png)"
+        echo "  snapshot           Get accessibility tree"
+        echo "  logs               Tail the daemon log"
+        echo ""
+        echo "Unlike 'cortex browser', coco-browser keeps a persistent session."
+        echo "All commands share the same page: navigate then evaluate/text/screenshot"
+        echo "all operate on the same loaded page."
+        ;;
+esac
