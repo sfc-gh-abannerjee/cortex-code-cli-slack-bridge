@@ -271,21 +271,22 @@ cmd_navigate() {
         return 1
     fi
 
-    # --wait-for-idle uses networkidle waitUntil: Playwright waits until there
-    # are fewer than 2 in-flight network requests for 500ms.  This lets
-    # Cloudflare JS challenges complete and the redirect to the real page finish
-    # before the command returns.  Timeout is raised to 60s to cover slow pages.
+    # --wait-for-idle uses waitUntil=load (waits for all page resources, including
+    # after redirects).  "networkidle" was avoided: it requires 500ms of zero
+    # network activity, which never fires on pages with analytics/websockets.
+    # Timeout is passed in the JSON payload (Playwright timeout) AND as the
+    # socket timeout so both layers agree.
     local wait_until="domcontentloaded"
     local timeout_ms=30000
     if [[ $wait_for_idle -eq 1 ]]; then
-        wait_until="networkidle"
+        wait_until="load"
         timeout_ms=60000
     fi
 
     local url_json
     url_json=$(_json_str "$url")
     local resp
-    resp=$(_send_cmd "{\"id\":\"nav\",\"action\":\"navigate\",\"url\":$url_json,\"waitUntil\":\"$wait_until\"}" "$timeout_ms")
+    resp=$(_send_cmd "{\"id\":\"nav\",\"action\":\"navigate\",\"url\":$url_json,\"waitUntil\":\"$wait_until\",\"timeout\":$timeout_ms}" "$timeout_ms")
     echo "$resp" | node -e "
 const d = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8').trim());
 if (d.error) { process.stderr.write('Error: ' + d.error + '\n'); process.exit(1); }
