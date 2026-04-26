@@ -7,15 +7,16 @@
 # persistent background process and routing commands to it via Unix socket.
 #
 # Usage:
-#   coco-browser start              Start the browser daemon
-#   coco-browser stop               Stop the browser daemon
-#   coco-browser status             Check if daemon is running
-#   coco-browser navigate <url>     Navigate to URL (persists across commands)
-#   coco-browser evaluate <js>      Evaluate JavaScript in page context
-#   coco-browser text               Get visible page text (full body)
-#   coco-browser screenshot [path]  Take screenshot
-#   coco-browser snapshot           Get accessibility tree
-#   coco-browser logs               Tail the daemon log
+#   coco-browser start [--headed]            Start the browser daemon (--headed shows window, bypasses bot detection)
+#   coco-browser stop                        Stop the browser daemon
+#   coco-browser status                      Check if daemon is running
+#   coco-browser navigate [--wait-for-idle] <url>  Navigate to URL; --wait-for-idle waits for Cloudflare/JS redirects
+#   coco-browser wait <ms>                   Sleep N milliseconds (let page JS/challenges run)
+#   coco-browser evaluate <js>               Evaluate JavaScript in page context
+#   coco-browser text                        Get visible page text (full body)
+#   coco-browser screenshot [path]           Take screenshot
+#   coco-browser snapshot                    Get accessibility tree
+#   coco-browser logs                        Tail the daemon log
 
 set -euo pipefail
 
@@ -46,6 +47,34 @@ _find_daemon() {
         return 1
     fi
     echo "$daemon"
+}
+
+# Resolve the cortex installation directory (parent of browser_daemon/).
+_find_cortex_dir() {
+    local cortex_bin
+    cortex_bin=$(which cortex 2>/dev/null) || {
+        echo "cortex not found in PATH" >&2; return 1
+    }
+    local cortex_real
+    cortex_real=$(python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" "$cortex_bin")
+    echo "$(dirname "$cortex_real")"
+}
+
+# Resolve the stealth daemon script (lives next to coco-browser in bin/).
+# Uses python3 realpath to handle three cases correctly:
+#   1. Relative invocation:  ./bin/coco-browser  (BASH_SOURCE[0] is relative)
+#   2. Symlinked bin:        /usr/local/bin/coco-browser → real install path
+#   3. Normal PATH lookup:   /Library/.../bin/coco-browser  (absolute, no symlink)
+_find_stealth_daemon() {
+    local this_real
+    this_real=$(python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" "${BASH_SOURCE[0]}")
+    local stealth
+    stealth="$(dirname "$this_real")/stealth-daemon.js"
+    if [[ ! -f "$stealth" ]]; then
+        echo "stealth-daemon.js not found at: $stealth" >&2
+        return 1
+    fi
+    echo "$stealth"
 }
 
 # Check whether the daemon process is alive.
@@ -125,6 +154,11 @@ if (v === undefined || v === null) {
 # ---------------------------------------------------------------------------
 
 cmd_start() {
+    local headed=0
+    if [[ "${1:-}" == "--headed" ]]; then
+        headed=1
+    fi
+
     _ensure_dir
     if _is_running; then
         echo "Browser daemon already running (PID $(<"$PID_FILE"))"
@@ -132,9 +166,28 @@ cmd_start() {
     fi
     local daemon
     daemon=$(_find_daemon)
-    echo "Starting browser daemon..."
+    if [[ $headed -eq 1 ]]; then
+        echo "Starting browser daemon (headed — visible window)..."
+    else
+        echo "Starting browser daemon..."
+    fi
     # The daemon writes its own PID to $BROWSER_DIR/default.pid on startup.
-    AGENT_BROWSER_SOCKET_DIR="$BROWSER_DIR" nohup node "$daemon" >> "$LOG_FILE" 2>&1 &
+    # --headed uses stealth-daemon.js which:
+    #   1. Runs headed Chromium (visible window)
+    #   2. Calls context.addInitScript to patch navigator.webdriver=false BEFORE
+    #      any page script runs — the only reliable way to pass Cloudflare Turnstile
+    #   3. Exposes the same Unix socket protocol as browser_daemon
+    if [[ $headed -eq 1 ]]; then
+        local stealth
+        stealth=$(_find_stealth_daemon)
+        local cortex_dir
+        cortex_dir=$(_find_cortex_dir)
+        AGENT_BROWSER_SOCKET_DIR="$BROWSER_DIR" \
+        CORTEX_DIR="$cortex_dir" \
+        nohup node "$stealth" >> "$LOG_FILE" 2>&1 &
+    else
+        AGENT_BROWSER_SOCKET_DIR="$BROWSER_DIR" nohup node "$daemon" >> "$LOG_FILE" 2>&1 &
+    fi
     local bg_pid=$!
     # Wait for daemon to write its PID file and socket
     local attempts=0
@@ -192,16 +245,47 @@ cmd_status() {
     fi
 }
 
-cmd_navigate() {
+cmd_wait() {
     if [[ $# -lt 1 ]]; then
-        echo "Usage: coco-browser navigate <url>" >&2
+        echo "Usage: coco-browser wait <milliseconds>" >&2
         return 1
     fi
-    local url="$1"
+    local ms="$1"
+    local sec
+    sec=$(python3 -c "print($ms / 1000.0)")
+    sleep "$sec"
+}
+
+cmd_navigate() {
+    local wait_for_idle=0
+    local url=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --wait-for-idle|--idle) wait_for_idle=1; shift ;;
+            *) url="$1"; shift ;;
+        esac
+    done
+
+    if [[ -z "$url" ]]; then
+        echo "Usage: coco-browser navigate [--wait-for-idle] <url>" >&2
+        return 1
+    fi
+
+    # --wait-for-idle uses networkidle waitUntil: Playwright waits until there
+    # are fewer than 2 in-flight network requests for 500ms.  This lets
+    # Cloudflare JS challenges complete and the redirect to the real page finish
+    # before the command returns.  Timeout is raised to 60s to cover slow pages.
+    local wait_until="domcontentloaded"
+    local timeout_ms=30000
+    if [[ $wait_for_idle -eq 1 ]]; then
+        wait_until="networkidle"
+        timeout_ms=60000
+    fi
+
     local url_json
     url_json=$(_json_str "$url")
     local resp
-    resp=$(_send_cmd "{\"id\":\"nav\",\"action\":\"navigate\",\"url\":$url_json,\"waitUntil\":\"domcontentloaded\"}" 30000)
+    resp=$(_send_cmd "{\"id\":\"nav\",\"action\":\"navigate\",\"url\":$url_json,\"waitUntil\":\"$wait_until\"}" "$timeout_ms")
     echo "$resp" | node -e "
 const d = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8').trim());
 if (d.error) { process.stderr.write('Error: ' + d.error + '\n'); process.exit(1); }
@@ -266,9 +350,10 @@ cmd_logs() {
 # ---------------------------------------------------------------------------
 
 case "${1:-help}" in
-    start)      cmd_start ;;
+    start)      shift; cmd_start "${1:-}" ;;
     stop)       cmd_stop ;;
     status)     cmd_status ;;
+    wait)       shift; cmd_wait "$@" ;;
     navigate)   shift; cmd_navigate "$@" ;;
     evaluate)   shift; cmd_evaluate "$@" ;;
     text)       cmd_text ;;
@@ -279,15 +364,25 @@ case "${1:-help}" in
         echo "coco-browser — Persistent browser session for Cortex Code"
         echo ""
         echo "Commands:"
-        echo "  start              Start the browser daemon"
-        echo "  stop               Stop the browser daemon"
-        echo "  status             Check if daemon is running"
-        echo "  navigate <url>     Navigate to URL (persists across commands)"
-        echo "  evaluate <js>      Evaluate JavaScript in page context"
-        echo "  text               Get visible page text (full body)"
-        echo "  screenshot [path]  Save screenshot (default: ~/.cortex-slack-bridge/browser/screenshot.png)"
-        echo "  snapshot           Get accessibility tree"
-        echo "  logs               Tail the daemon log"
+        echo "  start [--headed]               Start the browser daemon (--headed opens visible window,"
+        echo "                                 bypasses Cloudflare/bot detection)"
+        echo "  stop                           Stop the browser daemon"
+        echo "  status                         Check if daemon is running"
+        echo "  navigate [--wait-for-idle] <url>"
+        echo "                                 Navigate to URL; --wait-for-idle waits for JS redirects"
+        echo "                                 (Cloudflare challenges) before returning (60s timeout)"
+        echo "  wait <ms>                      Sleep N milliseconds (let page JS/challenges run)"
+        echo "  evaluate <js>                  Evaluate JavaScript in page context"
+        echo "  text                           Get visible page text (full body)"
+        echo "  screenshot [path]              Save screenshot (default: ~/.cortex-slack-bridge/browser/screenshot.png)"
+        echo "  snapshot                       Get accessibility tree"
+        echo "  logs                           Tail the daemon log"
+        echo ""
+        echo "For Cloudflare-protected pages (e.g. Medium):"
+        echo "  coco-browser stop"
+        echo "  coco-browser start --headed"
+        echo "  coco-browser navigate --wait-for-idle \"https://example.com\""
+        echo "  coco-browser text"
         echo ""
         echo "Unlike 'cortex browser', coco-browser keeps a persistent session."
         echo "All commands share the same page: navigate then evaluate/text/screenshot"
