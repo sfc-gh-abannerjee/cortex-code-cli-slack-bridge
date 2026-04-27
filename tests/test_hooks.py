@@ -129,3 +129,74 @@ def test_progress_hook_fires_after_cooldown_expires(tmp_path):
     )
     assert result.returncode == 0
     assert calls_file.exists(), "coco-notify should fire after cooldown expires"
+
+
+# ---------------------------------------------------------------------------
+# Feature 3: SessionEnd summary hook (slack-session-end.sh)
+# ---------------------------------------------------------------------------
+
+SESSION_END_SCRIPT = Path.home() / ".snowflake/cortex/hooks/slack-session-end.sh"
+
+
+def _run_session_end_hook(payload: dict, mock_notify_dir: Path):
+    env = {
+        **os.environ,
+        "PATH": f"{mock_notify_dir}:{os.environ.get('PATH', '')}",
+    }
+    return subprocess.run(
+        [str(SESSION_END_SCRIPT)],
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+
+@pytest.mark.skipif(not _has_jq(), reason="jq not installed")
+def test_session_end_hook_sends_notification(tmp_path):
+    calls_file = tmp_path / "notify_calls.txt"
+    mock = tmp_path / "coco-notify"
+    mock.write_text(f'#!/usr/bin/env bash\necho "$@" >> "{calls_file}"\n')
+    mock.chmod(mock.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+    result = _run_session_end_hook(
+        {"session_id": "end-sess", "reason": "logout", "hook_event_name": "SessionEnd"},
+        tmp_path,
+    )
+    assert result.returncode == 0
+    assert calls_file.exists(), f"coco-notify was not called. stderr: {result.stderr}"
+    content = calls_file.read_text()
+    assert "--type" in content
+    assert "status" in content
+
+
+@pytest.mark.skipif(not _has_jq(), reason="jq not installed")
+def test_session_end_hook_includes_reason(tmp_path):
+    calls_file = tmp_path / "notify_calls.txt"
+    mock = tmp_path / "coco-notify"
+    mock.write_text(f'#!/usr/bin/env bash\necho "$@" >> "{calls_file}"\n')
+    mock.chmod(mock.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+    result = _run_session_end_hook(
+        {"session_id": "end-sess2", "reason": "clear", "hook_event_name": "SessionEnd"},
+        tmp_path,
+    )
+    assert result.returncode == 0
+    content = calls_file.read_text()
+    assert "clear" in content, "Reason should appear in notification message"
+
+
+@pytest.mark.skipif(not _has_jq(), reason="jq not installed")
+def test_session_end_hook_handles_missing_reason(tmp_path):
+    """Hook should still fire even if reason field is absent."""
+    calls_file = tmp_path / "notify_calls.txt"
+    mock = tmp_path / "coco-notify"
+    mock.write_text(f'#!/usr/bin/env bash\necho "$@" >> "{calls_file}"\n')
+    mock.chmod(mock.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+    result = _run_session_end_hook(
+        {"session_id": "end-sess3", "hook_event_name": "SessionEnd"},
+        tmp_path,
+    )
+    assert result.returncode == 0
+    assert calls_file.exists(), "Hook should fire even without reason field"
