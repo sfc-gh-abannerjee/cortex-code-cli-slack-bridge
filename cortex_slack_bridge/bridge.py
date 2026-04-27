@@ -105,6 +105,7 @@ def _relay_to_tmux(tmux_name: str, text: str):
     with a freshly initializing terminal.
     """
     try:
+        log.info("TMUX_START name=%s text=%r", tmux_name, text[:40])
         check = subprocess.run(
             ["/opt/homebrew/bin/tmux", "has-session", "-t", tmux_name],
             capture_output=True,
@@ -127,8 +128,54 @@ def _relay_to_tmux(tmux_name: str, text: str):
 
 
 # ---------------------------------------------------------------------------
-# /coco-status slash command helper
+# Background relay poller — reads inbox and relays new entries to tmux.
+#
+# Runs in a dedicated daemon thread every 1 second, independent of Bolt's
+# ThreadPoolExecutor. This sidesteps the Bolt-thread-specific issue where
+# file I/O silently breaks for single-connection (×1 delivery) messages.
 # ---------------------------------------------------------------------------
+
+def _relay_poller(stop_event: threading.Event, relayed_ts: set) -> None:
+    """Poll the active session inbox and relay new reply entries to tmux."""
+    log.info("Relay poller started")
+    while not stop_event.is_set():
+        try:
+            sid = get_active_session()
+            inbox_path = get_session_inbox(sid)
+            if inbox_path.exists():
+                try:
+                    with open(inbox_path) as f:
+                        entries = json.load(f)
+                    if isinstance(entries, list):
+                        for entry in entries:
+                            if entry.get("type") != "reply":
+                                continue
+                            ts = entry.get("ts", "")
+                            if not ts or ts in relayed_ts:
+                                continue
+                            relayed_ts.add(ts)
+                            text = entry.get("text", "")
+                            reply_thread_ts = entry.get("reply_thread_ts") or ts
+                            tmux_name = get_tmux_session(sid) or find_any_tmux_session()
+                            if tmux_name:
+                                log.info("POLLER relay ts=%s tmux=%s text=%r",
+                                         ts[:12], tmux_name, text[:40])
+                                _relay_to_tmux(tmux_name, text)
+                                # Update last_ts in this thread — Bolt-thread
+                                # file I/O is broken for single-connection msgs.
+                                set_last_ts(sid, reply_thread_ts)
+                                log.info("POLLER set_last_ts=%s", reply_thread_ts[:12])
+                            else:
+                                log.warning("POLLER no tmux session for sid=%s", sid[:8])
+                except (json.JSONDecodeError, OSError) as exc:
+                    log.debug("POLLER inbox read error: %s", exc)
+        except Exception as exc:
+            log.warning("POLLER loop error: %s", exc)
+        stop_event.wait(timeout=1.0)
+    log.info("Relay poller stopped")
+
+
+
 
 def _build_status_response() -> str:
     """Build the text payload for the /coco-status slash command response."""
@@ -194,34 +241,38 @@ def create_app() -> App:
 
         log.info("DM received from %s: %s", user, text[:80])
 
-        sid = get_active_session()
+        # For thread replies, store the parent ts so coco-notify --thread
+        # replies into the correct Slack thread. For top-level DMs, use the
+        # message ts itself. We store this on the inbox entry so set_last_ts
+        # can be called from the poller thread (Bolt-thread file I/O is broken
+        # for single-connection deliveries).
+        reply_thread_ts = event.get("thread_ts") or ts
+
         _append_inbox({
             "type": "reply",
             "text": text,
             "user": user,
             "ts": ts,
+            "reply_thread_ts": reply_thread_ts,
             "received_at": time.time(),
         })
 
-        # Relay the message into the tmux session if one is registered.
-        # Fall back to scanning all tmux_* files in case the active session
-        # ID was overwritten by cortex's own SessionStart hook.
-        tmux_name = get_tmux_session(sid) or find_any_tmux_session()
-        if tmux_name:
-            _relay_to_tmux(tmux_name, text)
-        else:
-            log.warning("relay: no tmux session found for sid=%s", sid[:8])
-
-        # Persist ts so coco-notify --thread can reply under this message
-        if ts:
-            set_last_ts(sid, ts)
+        # Relay and set_last_ts are both handled by _relay_poller (started in
+        # main()). Doing either in Bolt's ThreadPoolExecutor causes silent file
+        # I/O failures for single-connection deliveries.
 
         # Use client.chat_postMessage directly — say() triggers Bolt's assistant
-        # context store for thread replies and throws KeyError: 'channel_id'
+        # context store for thread replies and throws KeyError: 'channel_id'.
+        # Mirror the user's thread context: if they replied in a thread, ack there.
         if channel:
             try:
+                # Always thread the ack under the user's message so the main
+                # DM view stays clean. For thread replies this lands in the
+                # existing thread; for top-level DMs it creates a thread so
+                # only "1 reply" is shown in the main view.
                 client.chat_postMessage(
                     channel=channel,
+                    thread_ts=event.get("thread_ts") or ts,
                     text="Message sent to CoCo CLI. Awaiting response... please wait :dash_board:",
                 )
             except Exception as e:
@@ -428,11 +479,39 @@ def main():
     app = create_app()
     handler = SocketModeHandler(app, get_app_token())
 
+    # Pre-populate relay_seen with any inbox entries that already exist,
+    # so we don't re-relay messages from before this startup.
+    relay_seen: set = set()
+    try:
+        sid = get_active_session()
+        existing_inbox = get_session_inbox(sid)
+        if existing_inbox.exists():
+            with open(existing_inbox) as f:
+                existing_entries = json.load(f)
+            if isinstance(existing_entries, list):
+                for e in existing_entries:
+                    t = e.get("ts", "")
+                    if t:
+                        relay_seen.add(t)
+            log.info("Pre-populated relay_seen with %d existing inbox entries", len(relay_seen))
+    except Exception as exc:
+        log.warning("Could not pre-populate relay_seen: %s", exc)
+
+    relay_stop = threading.Event()
+    relay_thread = threading.Thread(
+        target=_relay_poller,
+        args=(relay_stop, relay_seen),
+        name="relay-poller",
+        daemon=True,
+    )
+    relay_thread.start()
+
     try:
         handler.start()  # blocks until interrupted
     except KeyboardInterrupt:
         log.info("Shutting down bridge.")
     finally:
+        relay_stop.set()
         if PID_FILE.exists():
             PID_FILE.unlink()
 
