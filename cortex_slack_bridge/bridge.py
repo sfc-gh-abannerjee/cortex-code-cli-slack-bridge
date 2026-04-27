@@ -99,6 +99,8 @@ def _relay_to_tmux(tmux_name: str, text: str):
 
     Uses the list form of subprocess.run so the text is passed directly
     to tmux without shell interpretation (no injection risk).
+    Text and Enter are sent as separate calls to avoid race conditions
+    with a freshly initializing terminal.
     """
     try:
         check = subprocess.run(
@@ -107,7 +109,12 @@ def _relay_to_tmux(tmux_name: str, text: str):
         )
         if check.returncode == 0:
             subprocess.run(
-                ["/opt/homebrew/bin/tmux", "send-keys", "-t", tmux_name, text, "Enter"],
+                ["/opt/homebrew/bin/tmux", "send-keys", "-t", tmux_name, text],
+                capture_output=True,
+            )
+            time.sleep(0.2)
+            subprocess.run(
+                ["/opt/homebrew/bin/tmux", "send-keys", "-t", tmux_name, "Enter"],
                 capture_output=True,
             )
             log.info("Relayed DM to tmux session %s", tmux_name)
