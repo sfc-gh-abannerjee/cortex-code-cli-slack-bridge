@@ -144,13 +144,11 @@ def send_message(
         "event_payload": {"session_id": sid},
     }
 
-    # Color-coded attachment mode
+    # Color-coded attachment mode — attachments with color produce the colored
+    # left-border stripe in Slack. Block Kit alone (blocks=[...]) has no color.
     if msg_type and msg_type in MSG_TYPE_COLORS and blocks is None:
         icon = MSG_TYPE_ICONS[msg_type]
-        # Use blocks instead of attachments to avoid text+attachment duplication.
-        # The `text` param is only shown in push notifications, not in the chat
-        # UI, when blocks are present.
-        blocks = [
+        attachment_blocks = [
             {
                 "type": "section",
                 "text": {"type": "mrkdwn", "text": f"{icon} {text}"},
@@ -159,8 +157,13 @@ def send_message(
         try:
             resp = client.chat_postMessage(
                 channel=channel,
-                text=f"{icon} {text}",  # fallback for push notifications only
-                blocks=blocks,
+                text=f"{icon} {text}",  # fallback for push notifications
+                attachments=[
+                    {
+                        "color": MSG_TYPE_COLORS[msg_type],
+                        "blocks": attachment_blocks,
+                    }
+                ],
                 metadata=metadata,
             )
             set_active_session(sid)

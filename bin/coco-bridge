@@ -56,12 +56,39 @@ cmd_start() {
         return 0
     fi
     echo "Starting Cortex Code Slack Bridge..."
-    nohup "$PYTHON" -m cortex_slack_bridge.bridge >> "$LOG_FILE" 2>&1 &
-    local pid=$!
-    # Give it a moment to write its own PID file and connect
-    sleep 2
-    if kill -0 "$pid" 2>/dev/null; then
-        echo "Bridge started (PID $pid)"
+    # Use Python to launch the bridge in a new session (start_new_session=True calls
+    # os.setsid() so the child gets its own process group — it survives even when the
+    # parent shell is killed by a timeout or SIGKILL, unlike nohup+disown alone).
+    local launched_pid
+    launched_pid=$(python3 -c "
+import os, subprocess, sys
+log = open('$LOG_FILE', 'a')
+p = subprocess.Popen(
+    [sys.executable, '-m', 'cortex_slack_bridge.bridge'],
+    stdout=log, stderr=log, stdin=open('/dev/null'),
+    start_new_session=True,
+)
+print(p.pid)
+")
+    # Wait for the bridge to connect (writes its own PID file and Socket Mode session)
+    local attempts=0
+    while [[ $attempts -lt 15 ]]; do
+        sleep 1
+        attempts=$((attempts + 1))
+        if [[ -f "$PID_FILE" ]] && kill -0 "$(<"$PID_FILE")" 2>/dev/null; then
+            echo "Bridge started (PID $(<"$PID_FILE"))"
+            echo "Logs: $LOG_FILE"
+            return 0
+        fi
+        if ! kill -0 "$launched_pid" 2>/dev/null; then
+            echo "Bridge process exited unexpectedly. Check logs:" >&2
+            tail -20 "$LOG_FILE" >&2
+            return 1
+        fi
+    done
+    if kill -0 "$launched_pid" 2>/dev/null; then
+        echo "$launched_pid" > "$PID_FILE"
+        echo "Bridge started (PID $launched_pid)"
         echo "Logs: $LOG_FILE"
     else
         echo "Bridge failed to start. Check logs:" >&2

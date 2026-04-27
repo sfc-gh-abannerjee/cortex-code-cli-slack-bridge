@@ -12,8 +12,19 @@ dependencies = [
 include = ["cortex_slack_bridge*"]
 
 [tool.setuptools]
-script-files = ["bin/coco-browser", "bin/stealth-daemon.js"]
+script-files = ["bin/coco-bridge", "bin/coco-browser", "bin/stealth-daemon.js"]
 
 [project.scripts]
 coco-notify = "cortex_slack_bridge.notify:main"
-coco-bridge = "cortex_slack_bridge.bridge:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-mock>=3.12",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
