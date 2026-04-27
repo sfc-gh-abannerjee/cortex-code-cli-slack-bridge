@@ -86,11 +86,11 @@ def _append_inbox(entry: dict, session_id: str | None = None):
 
 
 # ---------------------------------------------------------------------------
-# /status slash command helper
+# /coco-status slash command helper
 # ---------------------------------------------------------------------------
 
 def _build_status_response() -> str:
-    """Build the text payload for the /status slash command response."""
+    """Build the text payload for the /coco-status slash command response."""
     sid = get_active_session()
 
     pid = "unknown"
@@ -219,10 +219,10 @@ def create_app() -> App:
 
         _update_confirmation_message(client, body, "Denied ✗")
 
-    # --- /status slash command ------------------------------------------------
-    @app.command("/status")
-    def handle_status(ack, body):
-        """Respond to /status with bridge health info."""
+    # --- /coco-status slash command -------------------------------------------
+    @app.command("/coco-status")
+    def handle_status(ack, body, client):
+        """Respond to /coco-status with bridge health info."""
         user = body.get("user_id", "")
         if user != target_user:
             ack(text="Unauthorized.")
