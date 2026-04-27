@@ -13,6 +13,7 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -166,7 +167,8 @@ def create_app() -> App:
     """Create and configure the Slack Bolt app."""
     app = App(token=get_bot_token())
     target_user = get_user_id()
-    _seen_ts: set[str] = set()  # dedup Socket Mode duplicate deliveries
+    _seen_ts: set[str] = set()
+    _seen_ts_lock = threading.Lock()  # guard dedup to prevent concurrent relay
 
     # --- DM listener -----------------------------------------------------------
     @app.event("message")
@@ -182,10 +184,13 @@ def create_app() -> App:
         ts = event.get("ts", "")
         channel = event.get("channel", "")
 
-        # Deduplicate: Socket Mode can deliver the same event twice
-        if ts in _seen_ts:
-            return
-        _seen_ts.add(ts)
+        # Deduplicate: Socket Mode can deliver the same event twice.
+        # Lock makes the check-and-add atomic so two concurrent deliveries
+        # of the same ts can't both slip through.
+        with _seen_ts_lock:
+            if ts in _seen_ts:
+                return
+            _seen_ts.add(ts)
 
         log.info("DM received from %s: %s", user, text[:80])
 
@@ -204,6 +209,8 @@ def create_app() -> App:
         tmux_name = get_tmux_session(sid) or find_any_tmux_session()
         if tmux_name:
             _relay_to_tmux(tmux_name, text)
+        else:
+            log.warning("relay: no tmux session found for sid=%s", sid[:8])
 
         # Persist ts so coco-notify --thread can reply under this message
         if ts:
@@ -219,6 +226,12 @@ def create_app() -> App:
                 )
             except Exception as e:
                 log.warning("Failed to send ack message: %s", e)
+
+    # --- Global error handler — route Bolt exceptions to our FileHandler ------
+    @app.error
+    def global_error_handler(error, logger):
+        """Catch any exception from a listener and log it via our FileHandler."""
+        log.error("BOLT LISTENER ERROR: %s", error, exc_info=error)
 
     # --- Button action handlers ------------------------------------------------
     @app.action("confirm_approve")
@@ -310,7 +323,7 @@ def create_app() -> App:
             )
             subprocess.run(
                 ["/opt/homebrew/bin/tmux", "send-keys", "-t", tmux_name,
-                 f"CORTEX_SESSION_ID={sid} cortex", "Enter"],
+                 f"CORTEX_SESSION_ID={sid} cortex --bypass", "Enter"],
                 check=True,
             )
         except subprocess.CalledProcessError as e:
