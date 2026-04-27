@@ -46,35 +46,6 @@ as a global Cortex Code utility, independent of the Slack bridge.
 | `resume` | Restore normal 1-min double-read cron |
 | `stop` | Clear inbox + delete cron entirely |
 
-## coco-browser CLI Commands
-
-`cortex browser` CLI starts a fresh Playwright MCP server on every invocation (hardcoded in the cortex binary), so page state is never shared between commands. `coco-browser` fixes this by running cortex's built-in `browser_daemon` as a persistent background process and routing all commands to it over a Unix socket.
-
-**Location:** `~/.snowflake/cortex/bin/coco-browser` (global, not in this repo)  
-**Data dir:** `~/.snowflake/cortex/browser/`
-
-| Command | What it does |
-|---|---|
-| `start` | Start the browser daemon (persists across commands) |
-| `stop` | Stop the daemon |
-| `status` | Check if daemon is running |
-| `navigate <url>` | Navigate to URL |
-| `evaluate <js>` | Evaluate JavaScript in page context |
-| `text` | Get full visible page text |
-| `screenshot [path]` | Save screenshot (default: `~/.snowflake/cortex/browser/screenshot.png`) |
-| `snapshot` | Get accessibility tree |
-| `logs` | Tail the daemon log |
-
-**Usage pattern:**
-```bash
-coco-browser start
-coco-browser navigate "https://example.com"
-coco-browser evaluate "document.title"   # sees the navigated page
-coco-browser text                         # full page text
-coco-browser screenshot /tmp/page.png
-coco-browser stop
-```
-
 ## Slack App
 
 - App name: "Dashs CoCo Remote" (dashlocoforcoco)

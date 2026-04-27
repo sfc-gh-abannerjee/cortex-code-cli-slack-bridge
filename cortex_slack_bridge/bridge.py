@@ -287,15 +287,19 @@ def create_app() -> App:
         # Mirror the user's thread context: if they replied in a thread, ack there.
         if channel:
             try:
-                # Always thread the ack under the user's message so the main
-                # DM view stays clean. For thread replies this lands in the
-                # existing thread; for top-level DMs it creates a thread so
-                # only "1 reply" is shown in the main view.
-                client.chat_postMessage(
+                # Brief pause so Slack's servers have committed the parent
+                # message before we reference its ts as thread_ts. Without
+                # this, chat_postMessage can return ok:true but silently post
+                # standalone when called within ~ms of event delivery.
+                time.sleep(0.15)
+                ack_thread_ts = event.get("thread_ts") or ts
+                resp = client.chat_postMessage(
                     channel=channel,
-                    thread_ts=event.get("thread_ts") or ts,
+                    thread_ts=ack_thread_ts,
                     text="Message sent to CoCo CLI. Awaiting response... please wait :dash_board:",
                 )
+                if not resp.get("ok"):
+                    log.warning("Ack postMessage not ok: %s ts=%s", resp.get("error"), ack_thread_ts)
             except Exception as e:
                 log.warning("Failed to send ack message: %s", e)
 
