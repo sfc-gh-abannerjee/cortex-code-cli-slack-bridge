@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -171,9 +172,10 @@ def get_active_session() -> str:
 
 
 def set_active_session(session_id: str):
-    """Mark a session as the most recently active."""
+    """Mark a session as the most recently active and register it."""
     ensure_dirs()
     ACTIVE_SESSION_FILE.write_text(session_id)
+    register_session(session_id)
 
 
 # ---------------------------------------------------------------------------
@@ -198,3 +200,57 @@ def set_last_ts(session_id: str | None = None, ts: str | None = None):
     sid = session_id or get_session_id()
     ts_file = BRIDGE_DIR / f"thread_ts_{sid}"
     ts_file.write_text(ts or "")
+
+
+# ---------------------------------------------------------------------------
+# Session registry — track all known sessions for multi-session selector
+# ---------------------------------------------------------------------------
+
+SESSIONS_FILE_NAME = "sessions.json"
+
+
+def _sessions_file() -> Path:
+    return BRIDGE_DIR / SESSIONS_FILE_NAME
+
+
+def get_sessions() -> list[dict]:
+    """Return all registered sessions, ordered by registration time."""
+    f = _sessions_file()
+    if not f.exists():
+        return []
+    try:
+        with open(f) as fp:
+            data = json.load(fp)
+        return data if isinstance(data, list) else []
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def register_session(session_id: str, label: str | None = None) -> None:
+    """Register (or update) a session in the sessions registry.
+
+    Idempotent: registering an existing session updates its label.
+    """
+    ensure_dirs()
+    sessions = get_sessions()
+    now = time.time()
+    label = label or session_id
+
+    for entry in sessions:
+        if entry.get("session_id") == session_id:
+            entry["label"] = label
+            entry["last_seen"] = now
+            break
+    else:
+        sessions.append({
+            "session_id": session_id,
+            "label": label,
+            "registered_at": now,
+            "last_seen": now,
+        })
+
+    f = _sessions_file()
+    tmp = f.with_suffix(".tmp")
+    with open(tmp, "w") as fp:
+        json.dump(sessions, fp, indent=2)
+    tmp.replace(f)

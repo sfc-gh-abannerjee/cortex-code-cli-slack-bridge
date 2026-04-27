@@ -112,3 +112,47 @@ def test_set_last_ts_overwrites_previous(tmp_path, monkeypatch):
     config.set_last_ts("overwrite-sess", "111.000")
     config.set_last_ts("overwrite-sess", "222.000")
     assert config.get_last_ts("overwrite-sess") == "222.000"
+
+
+# ---------------------------------------------------------------------------
+# Feature 7: multi-session registry (TDD — must pass after implementation)
+# ---------------------------------------------------------------------------
+
+def test_register_and_get_sessions(tmp_path, monkeypatch):
+    monkeypatch.setattr("cortex_slack_bridge.config.BRIDGE_DIR", tmp_path)
+    from cortex_slack_bridge import config
+    config.register_session("sess-a", "Session A")
+    config.register_session("sess-b", "Session B")
+    sessions = config.get_sessions()
+    ids = [s["session_id"] for s in sessions]
+    assert "sess-a" in ids
+    assert "sess-b" in ids
+
+
+def test_register_session_stores_label(tmp_path, monkeypatch):
+    monkeypatch.setattr("cortex_slack_bridge.config.BRIDGE_DIR", tmp_path)
+    from cortex_slack_bridge import config
+    config.register_session("sess-labeled", "My cool session")
+    sessions = config.get_sessions()
+    match = next((s for s in sessions if s["session_id"] == "sess-labeled"), None)
+    assert match is not None
+    assert match["label"] == "My cool session"
+
+
+def test_register_session_idempotent(tmp_path, monkeypatch):
+    """Registering the same session twice should not create duplicates."""
+    monkeypatch.setattr("cortex_slack_bridge.config.BRIDGE_DIR", tmp_path)
+    from cortex_slack_bridge import config
+    config.register_session("dupe-sess", "Dupe")
+    config.register_session("dupe-sess", "Dupe Updated")
+    sessions = config.get_sessions()
+    matching = [s for s in sessions if s["session_id"] == "dupe-sess"]
+    assert len(matching) == 1
+    assert matching[0]["label"] == "Dupe Updated"
+
+
+def test_get_sessions_empty(tmp_path, monkeypatch):
+    monkeypatch.setattr("cortex_slack_bridge.config.BRIDGE_DIR", tmp_path)
+    from cortex_slack_bridge import config
+    result = config.get_sessions()
+    assert result == []

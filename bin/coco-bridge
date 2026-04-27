@@ -232,6 +232,47 @@ cmd_clear_keychain() {
     echo "Done."
 }
 
+cmd_sessions() {
+    # List all registered sessions from the sessions registry
+    "$PYTHON" -c "
+import json, sys
+from pathlib import Path
+bridge_dir = Path.home() / '.cortex-slack-bridge'
+sessions_file = bridge_dir / 'sessions.json'
+active_file = bridge_dir / 'active_session'
+active = active_file.read_text().strip() if active_file.exists() else 'default'
+if not sessions_file.exists():
+    print('No sessions registered yet.')
+    sys.exit(0)
+sessions = json.loads(sessions_file.read_text())
+if not sessions:
+    print('No sessions registered yet.')
+    sys.exit(0)
+print(f'Registered sessions (active: {active}):')
+for s in sessions:
+    marker = '* ' if s['session_id'] == active else '  '
+    label = s.get('label', s['session_id'])
+    print(f'{marker}{s[\"session_id\"][:12]}  {label}')
+"
+}
+
+cmd_switch() {
+    if [[ $# -lt 1 ]]; then
+        echo "Usage: coco-bridge switch <session_id>" >&2
+        return 1
+    fi
+    local target="$1"
+    "$PYTHON" -c "
+from cortex_slack_bridge.config import set_active_session, get_sessions
+sessions = get_sessions()
+ids = [s['session_id'] for s in sessions]
+if '$target' not in ids:
+    print(f'Warning: session \"$target\" is not registered. Switching anyway.', flush=True)
+set_active_session('$target')
+print('Active session switched to: $target')
+"
+}
+
 # --- Main dispatch ---------------------------------------------------------
 case "${1:-help}" in
     start)   cmd_start ;;
@@ -244,6 +285,8 @@ case "${1:-help}" in
     history) shift; cmd_history "$@" ;;
     setup-keychain) cmd_setup_keychain ;;
     clear-keychain) cmd_clear_keychain ;;
+    sessions) cmd_sessions ;;
+    switch)   shift; cmd_switch "$@" ;;
     help|*)
         echo "coco-bridge — Cortex Code Slack Bridge"
         echo ""
@@ -256,6 +299,8 @@ case "${1:-help}" in
         echo "  logs               Tail the bridge log"
         echo "  inbox              Show current inbox contents"
         echo "  history [N]        Show last N history entries (default: 20)"
+        echo "  sessions           List all registered Cortex Code sessions"
+        echo "  switch <id>        Switch active session (routes DMs to that inbox)"
         echo "  setup-keychain     Store tokens in macOS Keychain (migrate from config.json)"
         echo "  clear-keychain     Remove tokens from macOS Keychain"
         ;;
