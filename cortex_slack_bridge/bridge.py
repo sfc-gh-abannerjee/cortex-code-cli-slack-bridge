@@ -10,6 +10,7 @@ Usage:
 
 import json
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -82,6 +83,39 @@ def _append_inbox(entry: dict, session_id: str | None = None):
     tmp.replace(inbox)
     log.info("Wrote inbox entry: %s -> session %s", entry.get("type", "unknown"), sid)
     _log_history(entry, "inbound")
+
+
+# ---------------------------------------------------------------------------
+# /status slash command helper
+# ---------------------------------------------------------------------------
+
+def _build_status_response() -> str:
+    """Build the text payload for the /status slash command response."""
+    sid = get_active_session()
+
+    pid = "unknown"
+    if PID_FILE.exists():
+        try:
+            pid = PID_FILE.read_text().strip()
+        except OSError:
+            pass
+
+    uptime = ""
+    if PID_FILE.exists():
+        try:
+            elapsed = int(time.time() - PID_FILE.stat().st_mtime)
+            h, rem = divmod(elapsed, 3600)
+            m, s = divmod(rem, 60)
+            uptime = f" (up {h}h {m}m {s}s)"
+        except OSError:
+            pass
+
+    return (
+        f"*Cortex Code Slack Bridge*\n"
+        f"• PID: `{pid}`{uptime}\n"
+        f"• Active session: `{sid}`\n"
+        f"• Inbox: `~/.cortex-slack-bridge/inbox_{sid}.json`"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +201,16 @@ def create_app() -> App:
         }, session_id=session_id)
 
         _update_confirmation_message(client, body, "Denied ✗")
+
+    # --- /status slash command ------------------------------------------------
+    @app.command("/status")
+    def handle_status(ack, body):
+        """Respond to /status with bridge health info."""
+        user = body.get("user_id", "")
+        if user != target_user:
+            ack(text="Unauthorized.")
+            return
+        ack(text=_build_status_response())
 
     return app
 

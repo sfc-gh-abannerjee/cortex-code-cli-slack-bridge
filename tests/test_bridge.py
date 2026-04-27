@@ -119,3 +119,48 @@ def test_create_app_requires_tokens(monkeypatch):
         from cortex_slack_bridge import bridge as bridge_mod
         with pytest.raises(RuntimeError):
             bridge_mod.create_app()
+
+
+# ---------------------------------------------------------------------------
+# Feature 5: /status slash command helper (TDD — must pass after implementation)
+# ---------------------------------------------------------------------------
+
+def test_build_status_response_contains_session(tmp_path, monkeypatch):
+    monkeypatch.setattr("cortex_slack_bridge.config.BRIDGE_DIR", tmp_path)
+    monkeypatch.setattr("cortex_slack_bridge.config.ACTIVE_SESSION_FILE",
+                        tmp_path / "active_session")
+    pid_file = tmp_path / "bridge.pid"
+    pid_file.write_text("99999")
+    monkeypatch.setattr("cortex_slack_bridge.bridge.PID_FILE", pid_file)
+    (tmp_path / "active_session").write_text("sess-status-test")
+
+    from cortex_slack_bridge.bridge import _build_status_response
+    text = _build_status_response()
+    assert "sess-status-test" in text
+
+
+def test_build_status_response_contains_pid(tmp_path, monkeypatch):
+    monkeypatch.setattr("cortex_slack_bridge.config.BRIDGE_DIR", tmp_path)
+    monkeypatch.setattr("cortex_slack_bridge.config.ACTIVE_SESSION_FILE",
+                        tmp_path / "active_session")
+    pid_file = tmp_path / "bridge.pid"
+    pid_file.write_text("54321")
+    monkeypatch.setattr("cortex_slack_bridge.bridge.PID_FILE", pid_file)
+    (tmp_path / "active_session").write_text("sess-pid-test")
+
+    from cortex_slack_bridge.bridge import _build_status_response
+    text = _build_status_response()
+    assert "54321" in text
+
+
+def test_build_status_response_no_pid_file(tmp_path, monkeypatch):
+    monkeypatch.setattr("cortex_slack_bridge.config.BRIDGE_DIR", tmp_path)
+    monkeypatch.setattr("cortex_slack_bridge.config.ACTIVE_SESSION_FILE",
+                        tmp_path / "active_session")
+    monkeypatch.setattr("cortex_slack_bridge.bridge.PID_FILE", tmp_path / "bridge.pid")
+    # No PID file — should not raise
+
+    from cortex_slack_bridge.bridge import _build_status_response
+    text = _build_status_response()
+    assert isinstance(text, str)
+    assert len(text) > 0
