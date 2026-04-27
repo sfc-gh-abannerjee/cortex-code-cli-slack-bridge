@@ -26,6 +26,7 @@ from cortex_slack_bridge.config import (
     PID_FILE,
     ensure_dirs,
     get_active_session,
+    find_any_tmux_session,
     get_app_token,
     get_bot_token,
     get_session_inbox,
@@ -197,8 +198,10 @@ def create_app() -> App:
             "received_at": time.time(),
         })
 
-        # Relay the message into the tmux session if one is registered
-        tmux_name = get_tmux_session(sid)
+        # Relay the message into the tmux session if one is registered.
+        # Fall back to scanning all tmux_* files in case the active session
+        # ID was overwritten by cortex's own SessionStart hook.
+        tmux_name = get_tmux_session(sid) or find_any_tmux_session()
         if tmux_name:
             _relay_to_tmux(tmux_name, text)
 

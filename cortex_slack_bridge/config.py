@@ -277,3 +277,29 @@ def set_tmux_session(session_id: str, tmux_name: str) -> None:
     ensure_dirs()
     tmux_file = BRIDGE_DIR / f"tmux_{session_id}"
     tmux_file.write_text(tmux_name)
+
+
+def find_any_tmux_session() -> str | None:
+    """Scan all tmux_* files and return the first live tmux session name.
+
+    Used as a fallback when the active session ID has changed (e.g. cortex
+    replaced the bridge session ID with its own internal session ID after
+    the SessionStart hook ran).
+    """
+    for tmux_file in sorted(BRIDGE_DIR.glob("tmux_*")):
+        try:
+            name = tmux_file.read_text().strip()
+        except OSError:
+            continue
+        if not name:
+            continue
+        try:
+            result = subprocess.run(
+                ["/opt/homebrew/bin/tmux", "has-session", "-t", name],
+                capture_output=True,
+            )
+            if result.returncode == 0:
+                return name
+        except OSError:
+            continue
+    return None
