@@ -99,26 +99,31 @@ def _append_inbox(entry: dict, session_id: str | None = None):
 def _relay_to_tmux(tmux_name: str, text: str):
     """Send text to a running tmux session as keyboard input.
 
-    Uses the list form of subprocess.run so the text is passed directly
-    to tmux without shell interpretation (no injection risk).
-    Text and Enter are sent as separate calls to avoid race conditions
-    with a freshly initializing terminal.
+    Uses the list form so text is passed directly to tmux without shell
+    interpretation (no injection risk). Text and Enter are sent as separate
+    calls to avoid race conditions with a freshly initializing terminal.
+
+    Uses DEVNULL for all stdio to avoid creating pipes — pipe creation via
+    capture_output=True triggers a fork+pipe setup that can leave the
+    WebSocket send buffer in a degraded state on macOS, causing Bolt's
+    ack() to silently fail for subsequent slash commands.
     """
+    devnull = subprocess.DEVNULL
     try:
         log.info("TMUX_START name=%s text=%r", tmux_name, text[:40])
         check = subprocess.run(
             ["/opt/homebrew/bin/tmux", "has-session", "-t", tmux_name],
-            capture_output=True,
+            stdin=devnull, stdout=devnull, stderr=devnull,
         )
         if check.returncode == 0:
             subprocess.run(
                 ["/opt/homebrew/bin/tmux", "send-keys", "-t", tmux_name, text],
-                capture_output=True,
+                stdin=devnull, stdout=devnull, stderr=devnull,
             )
             time.sleep(0.5)
             subprocess.run(
                 ["/opt/homebrew/bin/tmux", "send-keys", "-t", tmux_name, "Enter"],
-                capture_output=True,
+                stdin=devnull, stdout=devnull, stderr=devnull,
             )
             log.info("Relayed DM to tmux session %s", tmux_name)
         else:
@@ -160,11 +165,12 @@ def _relay_poller(stop_event: threading.Event, relayed_ts: set) -> None:
                             if tmux_name:
                                 log.info("POLLER relay ts=%s tmux=%s text=%r",
                                          ts[:12], tmux_name, text[:40])
-                                _relay_to_tmux(tmux_name, text)
-                                # Update last_ts in this thread — Bolt-thread
-                                # file I/O is broken for single-connection msgs.
+                                # Set last_ts BEFORE relaying so coco-bridge send
+                                # threads correctly even if CoCo responds faster
+                                # than the relay subprocess (which sleeps 0.5s).
                                 set_last_ts(sid, reply_thread_ts)
                                 log.info("POLLER set_last_ts=%s", reply_thread_ts[:12])
+                                _relay_to_tmux(tmux_name, text)
                             else:
                                 log.warning("POLLER no tmux session for sid=%s", sid[:8])
                 except (json.JSONDecodeError, OSError) as exc:
@@ -216,6 +222,21 @@ def create_app() -> App:
     target_user = get_user_id()
     _seen_ts: set[str] = set()
     _seen_ts_lock = threading.Lock()  # guard dedup to prevent concurrent relay
+
+    # Slash command dedup: Socket Mode delivers events on both WebSocket
+    # connections simultaneously. Track (user, command) → last_processed_time
+    # and skip the second delivery within a 2-second window.
+    _seen_slash: dict = {}
+    _seen_slash_lock = threading.Lock()
+
+    def _is_duplicate_slash(user_id: str, command: str) -> bool:
+        key = (user_id, command)
+        now = time.time()
+        with _seen_slash_lock:
+            if now - _seen_slash.get(key, 0) < 2.0:
+                return True
+            _seen_slash[key] = now
+            return False
 
     # --- DM listener -----------------------------------------------------------
     @app.event("message")
@@ -334,17 +355,18 @@ def create_app() -> App:
     @app.command("/coco-status")
     def handle_status(ack, respond, body):
         """Respond to /coco-status with bridge health info."""
-        ack()  # must ack within 3s — do it bare before any work
-        log.info("STATUS_CMD received user=%s", body.get("user_id", "?"))
         user = body.get("user_id", "")
         if user != target_user:
-            respond(text="Unauthorized.")
+            ack(text="Unauthorized.")
             return
-        try:
-            respond(text=_build_status_response())
-        except Exception as exc:
-            log.error("STATUS_CMD failed: %s", exc)
-            respond(text="Error building status response.")
+        # ack() sends over the WebSocket, which can silently fail when Slack
+        # closes the connection mid-flight (TCP send buffer accepts the write
+        # but the kernel drops it on the subsequent RST). A zero-width-space
+        # body prevents "app did not respond" when the WebSocket IS healthy.
+        # respond() sends via HTTP POST to response_url — a fresh HTTPS
+        # connection, immune to WebSocket state — so the status always arrives.
+        ack(text="\u200b")
+        respond(text=_build_status_response())
 
     # --- /coco-launch slash command -------------------------------------------
     @app.command("/coco-launch")
@@ -355,6 +377,8 @@ def create_app() -> App:
         If path is omitted, defaults to the user's home directory.
         """
         ack()  # ack immediately before any work
+        if _is_duplicate_slash(body.get("user_id", ""), "/coco-launch"):
+            return
         user = body.get("user_id", "")
         if user != target_user:
             respond(text="Unauthorized.")
