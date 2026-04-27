@@ -254,3 +254,26 @@ def register_session(session_id: str, label: str | None = None) -> None:
     with open(tmp, "w") as fp:
         json.dump(sessions, fp, indent=2)
     tmp.replace(f)
+
+
+# ---------------------------------------------------------------------------
+# tmux session — track the tmux session name for Slack-launched sessions
+# ---------------------------------------------------------------------------
+
+def get_tmux_session(session_id: str | None = None) -> str | None:
+    """Return the tmux session name for a bridge-managed session, or None."""
+    sid = session_id or get_session_id()
+    tmux_file = BRIDGE_DIR / f"tmux_{sid}"
+    if tmux_file.exists():
+        try:
+            return tmux_file.read_text().strip() or None
+        except OSError:
+            pass
+    return None
+
+
+def set_tmux_session(session_id: str, tmux_name: str) -> None:
+    """Persist the tmux session name for a bridge-managed session."""
+    ensure_dirs()
+    tmux_file = BRIDGE_DIR / f"tmux_{session_id}"
+    tmux_file.write_text(tmux_name)

@@ -273,6 +273,38 @@ print('Active session switched to: $target')
 "
 }
 
+cmd_launch() {
+    local path="${1:-$HOME}"
+    local expanded_path
+    expanded_path=$(python3 -c "import os; print(os.path.expanduser('$path'))")
+
+    if [[ ! -d "$expanded_path" ]]; then
+        echo "Error: directory not found: $path" >&2
+        return 1
+    fi
+
+    local sid
+    sid=$(python3 -c "import uuid; print(str(uuid.uuid4()))")
+    local tmux_name="coco-${sid:0:8}"
+
+    echo "Launching tmux session '$tmux_name' in $expanded_path..."
+    /opt/homebrew/bin/tmux new-session -d -s "$tmux_name" -c "$expanded_path"
+    /opt/homebrew/bin/tmux send-keys -t "$tmux_name" "CORTEX_SESSION_ID=$sid cortex" Enter
+
+    "$PYTHON" -c "
+from cortex_slack_bridge.config import set_active_session, set_tmux_session
+set_active_session('$sid')
+set_tmux_session('$sid', '$tmux_name')
+"
+    echo ""
+    echo "Session launched:"
+    echo "  Session ID  : $sid"
+    echo "  tmux name   : $tmux_name"
+    echo "  Directory   : $expanded_path"
+    echo "  Mac resume  : cortex resume  (then pick this session from the list)"
+    echo "  tmux attach : /opt/homebrew/bin/tmux attach -t $tmux_name"
+}
+
 # --- Main dispatch ---------------------------------------------------------
 case "${1:-help}" in
     start)   cmd_start ;;
@@ -287,6 +319,7 @@ case "${1:-help}" in
     clear-keychain) cmd_clear_keychain ;;
     sessions) cmd_sessions ;;
     switch)   shift; cmd_switch "$@" ;;
+    launch)   shift; cmd_launch "$@" ;;
     help|*)
         echo "coco-bridge — Cortex Code Slack Bridge"
         echo ""
@@ -301,6 +334,7 @@ case "${1:-help}" in
         echo "  history [N]        Show last N history entries (default: 20)"
         echo "  sessions           List all registered Cortex Code sessions"
         echo "  switch <id>        Switch active session (routes DMs to that inbox)"
+        echo "  launch [path]      Launch a new headless CoCo session in tmux"
         echo "  setup-keychain     Store tokens in macOS Keychain (migrate from config.json)"
         echo "  clear-keychain     Remove tokens from macOS Keychain"
         ;;

@@ -11,8 +11,10 @@ Usage:
 import json
 import logging
 import os
+import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 from slack_bolt import App
@@ -27,8 +29,11 @@ from cortex_slack_bridge.config import (
     get_app_token,
     get_bot_token,
     get_session_inbox,
+    get_tmux_session,
     get_user_id,
+    set_active_session,
     set_last_ts,
+    set_tmux_session,
 )
 
 # ---------------------------------------------------------------------------
@@ -83,6 +88,33 @@ def _append_inbox(entry: dict, session_id: str | None = None):
     tmp.replace(inbox)
     log.info("Wrote inbox entry: %s -> session %s", entry.get("type", "unknown"), sid)
     _log_history(entry, "inbound")
+
+
+# ---------------------------------------------------------------------------
+# tmux relay — forward Slack DMs into a running tmux+cortex session
+# ---------------------------------------------------------------------------
+
+def _relay_to_tmux(tmux_name: str, text: str):
+    """Send text to a running tmux session as keyboard input.
+
+    Uses the list form of subprocess.run so the text is passed directly
+    to tmux without shell interpretation (no injection risk).
+    """
+    try:
+        check = subprocess.run(
+            ["/opt/homebrew/bin/tmux", "has-session", "-t", tmux_name],
+            capture_output=True,
+        )
+        if check.returncode == 0:
+            subprocess.run(
+                ["/opt/homebrew/bin/tmux", "send-keys", "-t", tmux_name, text, "Enter"],
+                capture_output=True,
+            )
+            log.info("Relayed DM to tmux session %s", tmux_name)
+        else:
+            log.warning("tmux session %s not found — skipping relay", tmux_name)
+    except Exception as e:
+        log.warning("tmux relay failed: %s", e)
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +190,11 @@ def create_app() -> App:
             "received_at": time.time(),
         })
 
+        # Relay the message into the tmux session if one is registered
+        tmux_name = get_tmux_session(sid)
+        if tmux_name:
+            _relay_to_tmux(tmux_name, text)
+
         # Persist ts so coco-notify --thread can reply under this message
         if ts:
             set_last_ts(sid, ts)
@@ -228,6 +265,65 @@ def create_app() -> App:
             ack(text="Unauthorized.")
             return
         ack(text=_build_status_response())
+
+    # --- /coco-launch slash command -------------------------------------------
+    @app.command("/coco-launch")
+    def handle_launch(ack, body, client):
+        """Launch a new headless Cortex Code session in a tmux window.
+
+        Usage: /coco-launch [path]
+        If path is omitted, defaults to the user's home directory.
+        """
+        user = body.get("user_id", "")
+        if user != target_user:
+            ack(text="Unauthorized.")
+            return
+        ack()
+
+        raw_path = body.get("text", "").strip() or "~"
+        expanded = os.path.expanduser(raw_path)
+
+        if not os.path.isdir(expanded):
+            client.chat_postMessage(
+                channel=body["channel_id"],
+                text=f"Path not found: `{raw_path}`",
+            )
+            return
+
+        sid = str(uuid.uuid4())
+        tmux_name = f"coco-{sid[:8]}"
+
+        try:
+            subprocess.run(
+                ["/opt/homebrew/bin/tmux", "new-session", "-d", "-s", tmux_name, "-c", expanded],
+                check=True,
+            )
+            subprocess.run(
+                ["/opt/homebrew/bin/tmux", "send-keys", "-t", tmux_name,
+                 f"CORTEX_SESSION_ID={sid} cortex", "Enter"],
+                check=True,
+            )
+        except subprocess.CalledProcessError as e:
+            log.error("Failed to create tmux session: %s", e)
+            client.chat_postMessage(
+                channel=body["channel_id"],
+                text=f"Failed to launch session: `{e}`",
+            )
+            return
+
+        set_active_session(sid)
+        set_tmux_session(sid, tmux_name)
+        log.info("Launched tmux session %s for sid %s in %s", tmux_name, sid, expanded)
+
+        client.chat_postMessage(
+            channel=body["channel_id"],
+            text=(
+                f"*Session launched* in `{raw_path}`\n"
+                f"• tmux: `{tmux_name}`\n"
+                f"• Resume on Mac: run `cortex resume` and pick this session\n"
+                f"Send messages here to interact with Cortex Code."
+            ),
+        )
 
     return app
 
