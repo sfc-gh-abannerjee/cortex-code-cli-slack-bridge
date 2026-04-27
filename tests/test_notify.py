@@ -187,3 +187,45 @@ def test_send_message_msg_type_color_values(monkeypatch, tmp_path):
         call_kwargs = mock_client.chat_postMessage.call_args.kwargs
         assert call_kwargs["attachments"][0]["color"] == expected_color, \
             f"Wrong color for msg_type={msg_type}"
+
+
+# ---------------------------------------------------------------------------
+# Feature 4: reply threading (TDD — must pass after implementation)
+# ---------------------------------------------------------------------------
+
+def test_send_message_with_thread_ts(monkeypatch, tmp_path):
+    """When thread_ts is passed, chat_postMessage receives it for threading."""
+    mock_client = _make_mock_client()
+    monkeypatch.setenv("SLACK_BRIDGE_BOT_TOKEN", "xoxb-test")
+    monkeypatch.setenv("SLACK_BRIDGE_USER_ID", "U123")
+    monkeypatch.setenv("CORTEX_SESSION_ID", "sess-thread")
+    monkeypatch.setattr("cortex_slack_bridge.notify.HISTORY_FILE", tmp_path / "history.jsonl")
+    monkeypatch.setattr("cortex_slack_bridge.config.ACTIVE_SESSION_FILE",
+                        tmp_path / "active_session")
+    monkeypatch.setattr("cortex_slack_bridge.config.BRIDGE_DIR", tmp_path)
+
+    with patch("cortex_slack_bridge.notify.WebClient", return_value=mock_client):
+        from cortex_slack_bridge.notify import send_message
+        send_message("Reply in thread", thread_ts="9876543210.111111")
+
+    call_kwargs = mock_client.chat_postMessage.call_args.kwargs
+    assert call_kwargs.get("thread_ts") == "9876543210.111111"
+
+
+def test_send_message_without_thread_ts_no_thread(monkeypatch, tmp_path):
+    """Without thread_ts, chat_postMessage should NOT receive a thread_ts."""
+    mock_client = _make_mock_client()
+    monkeypatch.setenv("SLACK_BRIDGE_BOT_TOKEN", "xoxb-test")
+    monkeypatch.setenv("SLACK_BRIDGE_USER_ID", "U123")
+    monkeypatch.setenv("CORTEX_SESSION_ID", "sess-nothread")
+    monkeypatch.setattr("cortex_slack_bridge.notify.HISTORY_FILE", tmp_path / "history.jsonl")
+    monkeypatch.setattr("cortex_slack_bridge.config.ACTIVE_SESSION_FILE",
+                        tmp_path / "active_session")
+    monkeypatch.setattr("cortex_slack_bridge.config.BRIDGE_DIR", tmp_path)
+
+    with patch("cortex_slack_bridge.notify.WebClient", return_value=mock_client):
+        from cortex_slack_bridge.notify import send_message
+        send_message("Top-level message")
+
+    call_kwargs = mock_client.chat_postMessage.call_args.kwargs
+    assert call_kwargs.get("thread_ts") is None

@@ -85,3 +85,30 @@ def test_missing_bot_token_raises(monkeypatch):
             assert False, "Expected RuntimeError"
         except RuntimeError as e:
             assert "SLACK_BRIDGE_BOT_TOKEN" in str(e)
+
+
+# ---------------------------------------------------------------------------
+# Feature 4: thread_ts per-session storage (TDD — must pass after implementation)
+# ---------------------------------------------------------------------------
+
+def test_get_last_ts_returns_none_when_no_file(tmp_path, monkeypatch):
+    monkeypatch.setattr("cortex_slack_bridge.config.BRIDGE_DIR", tmp_path)
+    from cortex_slack_bridge import config
+    result = config.get_last_ts("no-such-session")
+    assert result is None
+
+
+def test_set_and_get_last_ts_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setattr("cortex_slack_bridge.config.BRIDGE_DIR", tmp_path)
+    from cortex_slack_bridge import config
+    config.set_last_ts("thread-sess", "1234567890.123456")
+    result = config.get_last_ts("thread-sess")
+    assert result == "1234567890.123456"
+
+
+def test_set_last_ts_overwrites_previous(tmp_path, monkeypatch):
+    monkeypatch.setattr("cortex_slack_bridge.config.BRIDGE_DIR", tmp_path)
+    from cortex_slack_bridge import config
+    config.set_last_ts("overwrite-sess", "111.000")
+    config.set_last_ts("overwrite-sess", "222.000")
+    assert config.get_last_ts("overwrite-sess") == "222.000"

@@ -25,6 +25,7 @@ from cortex_slack_bridge.config import (
     HISTORY_FILE,
     ensure_dirs,
     get_bot_token,
+    get_last_ts,
     get_session_id,
     get_session_inbox,
     get_user_id,
@@ -120,6 +121,7 @@ def send_message(
     blocks: list | None = None,
     msg_type: str | None = None,
     session_id: str | None = None,
+    thread_ts: str | None = None,
 ) -> dict:
     """Send a DM notification to the configured Slack user.
 
@@ -130,6 +132,7 @@ def send_message(
             When set, the message is sent as a color-coded attachment.
             Ignored if blocks is provided.
         session_id: Cortex Code session ID for routing.
+        thread_ts: Slack message timestamp to reply under (for threading).
 
     Returns the Slack API response dict.
     """
@@ -165,6 +168,7 @@ def send_message(
                     }
                 ],
                 metadata=metadata,
+                thread_ts=thread_ts,
             )
             set_active_session(sid)
             _log_history({"type": "notification", "text": text, "msg_type": msg_type, "session_id": sid}, "outbound")
@@ -184,7 +188,8 @@ def send_message(
 
     try:
         resp = client.chat_postMessage(
-            channel=channel, text=text, blocks=blocks, metadata=metadata
+            channel=channel, text=text, blocks=blocks, metadata=metadata,
+            thread_ts=thread_ts,
         )
         set_active_session(sid)
         _log_history({"type": "notification", "text": text, "session_id": sid}, "outbound")
@@ -299,10 +304,21 @@ def main():
         default=None,
         help="Message type for color-coded attachments (blue/green/yellow/red)",
     )
+    parser.add_argument(
+        "--thread",
+        action="store_true",
+        default=False,
+        help="Reply in-thread using the last inbound message timestamp",
+    )
 
     args = parser.parse_args()
 
     ensure_dirs()
+
+    # Resolve thread_ts: use last inbound ts if --thread flag is set
+    resolved_thread_ts: str | None = None
+    if args.thread:
+        resolved_thread_ts = get_last_ts(args.session)
 
     if args.confirm:
         cid = args.confirmation_id or f"confirm-{int(time.time())}"
@@ -319,7 +335,8 @@ def main():
             sys.exit(1)
     else:
         send_message(
-            args.message, msg_type=args.msg_type, session_id=args.session
+            args.message, msg_type=args.msg_type, session_id=args.session,
+            thread_ts=resolved_thread_ts,
         )
         print("sent")
 

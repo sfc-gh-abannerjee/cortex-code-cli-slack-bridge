@@ -27,6 +27,7 @@ from cortex_slack_bridge.config import (
     get_bot_token,
     get_session_inbox,
     get_user_id,
+    set_last_ts,
 )
 
 # ---------------------------------------------------------------------------
@@ -103,15 +104,21 @@ def create_app() -> App:
             return
 
         text = event.get("text", "")
+        ts = event.get("ts", "")
         log.info("DM received from %s: %s", user, text[:80])
 
+        sid = get_active_session()
         _append_inbox({
             "type": "reply",
             "text": text,
             "user": user,
-            "ts": event.get("ts", ""),
+            "ts": ts,
             "received_at": time.time(),
         })
+
+        # Persist ts so coco-notify --thread can reply under this message
+        if ts:
+            set_last_ts(sid, ts)
 
         say("Message sent to CoCo CLI. Awaiting response... please wait :dash_board:")
 
@@ -120,9 +127,12 @@ def create_app() -> App:
     def handle_approve(ack, body, client):
         """Handle Approve button click."""
         ack()
+        user = body.get("user", {}).get("id", "")
+        if user != target_user:
+            log.warning("Approve ignored — unauthorized user %s", user)
+            return
         action_id = _extract_confirmation_id(body)
         session_id = _extract_session_id(body, client)
-        user = body.get("user", {}).get("id", "")
         log.info("Approve clicked by %s for confirmation %s (session %s)", user, action_id, session_id)
 
         _append_inbox({
@@ -140,9 +150,12 @@ def create_app() -> App:
     def handle_deny(ack, body, client):
         """Handle Deny button click."""
         ack()
+        user = body.get("user", {}).get("id", "")
+        if user != target_user:
+            log.warning("Deny ignored — unauthorized user %s", user)
+            return
         action_id = _extract_confirmation_id(body)
         session_id = _extract_session_id(body, client)
-        user = body.get("user", {}).get("id", "")
         log.info("Deny clicked by %s for confirmation %s (session %s)", user, action_id, session_id)
 
         _append_inbox({

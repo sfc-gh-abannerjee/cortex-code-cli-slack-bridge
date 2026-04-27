@@ -174,3 +174,27 @@ def set_active_session(session_id: str):
     """Mark a session as the most recently active."""
     ensure_dirs()
     ACTIVE_SESSION_FILE.write_text(session_id)
+
+
+# ---------------------------------------------------------------------------
+# Thread timestamp — track the last inbound message ts for DM threading
+# ---------------------------------------------------------------------------
+
+def get_last_ts(session_id: str | None = None) -> str | None:
+    """Return the last inbound Slack message timestamp for threading."""
+    sid = session_id or get_session_id()
+    ts_file = BRIDGE_DIR / f"thread_ts_{sid}"
+    if ts_file.exists():
+        try:
+            return ts_file.read_text().strip() or None
+        except OSError:
+            pass
+    return None
+
+
+def set_last_ts(session_id: str | None = None, ts: str | None = None):
+    """Persist the last inbound message timestamp for reply threading."""
+    ensure_dirs()
+    sid = session_id or get_session_id()
+    ts_file = BRIDGE_DIR / f"thread_ts_{sid}"
+    ts_file.write_text(ts or "")
