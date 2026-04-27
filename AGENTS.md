@@ -15,11 +15,13 @@ cortex_slack_bridge/
   notify.py          ← Notification helpers
 bin/
   coco-bridge        ← CLI entrypoint (send, history, setup-keychain, clear-keychain, pause, resume, stop)
-  coco-browser       ← Persistent browser session CLI (navigate/evaluate/text/screenshot chain)
 skill/
   SKILL.md           ← Cortex Code skill definition (must be copied to ~/.snowflake/cortex/skills/slack-bridge/)
 config.json.example  ← Template for Slack tokens
 ```
+
+Note: `coco-browser` is NOT in this repo. It lives at `~/.snowflake/cortex/bin/coco-browser`
+as a global Cortex Code utility, independent of the Slack bridge.
 
 ## Critical Rules
 
@@ -48,7 +50,8 @@ config.json.example  ← Template for Slack tokens
 
 `cortex browser` CLI starts a fresh Playwright MCP server on every invocation (hardcoded in the cortex binary), so page state is never shared between commands. `coco-browser` fixes this by running cortex's built-in `browser_daemon` as a persistent background process and routing all commands to it over a Unix socket.
 
-Data dir: `~/.cortex-slack-bridge/browser/`
+**Location:** `~/.snowflake/cortex/bin/coco-browser` (global, not in this repo)  
+**Data dir:** `~/.snowflake/cortex/browser/`
 
 | Command | What it does |
 |---|---|
@@ -58,7 +61,7 @@ Data dir: `~/.cortex-slack-bridge/browser/`
 | `navigate <url>` | Navigate to URL |
 | `evaluate <js>` | Evaluate JavaScript in page context |
 | `text` | Get full visible page text |
-| `screenshot [path]` | Save screenshot (default: `~/.cortex-slack-bridge/browser/screenshot.png`) |
+| `screenshot [path]` | Save screenshot (default: `~/.snowflake/cortex/browser/screenshot.png`) |
 | `snapshot` | Get accessibility tree |
 | `logs` | Tail the daemon log |
 

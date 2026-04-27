@@ -12,7 +12,7 @@ dependencies = [
 include = ["cortex_slack_bridge*"]
 
 [tool.setuptools]
-script-files = ["bin/coco-bridge", "bin/coco-browser", "bin/stealth-daemon.js"]
+script-files = ["bin/coco-bridge"]
 
 [project.scripts]
 coco-notify = "cortex_slack_bridge.notify:main"
