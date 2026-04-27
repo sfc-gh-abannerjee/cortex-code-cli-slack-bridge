@@ -114,7 +114,7 @@ def _relay_to_tmux(tmux_name: str, text: str):
                 ["/opt/homebrew/bin/tmux", "send-keys", "-t", tmux_name, text],
                 capture_output=True,
             )
-            time.sleep(0.2)
+            time.sleep(0.5)
             subprocess.run(
                 ["/opt/homebrew/bin/tmux", "send-keys", "-t", tmux_name, "Enter"],
                 capture_output=True,
