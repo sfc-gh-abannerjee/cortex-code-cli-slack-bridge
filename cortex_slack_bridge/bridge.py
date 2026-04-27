@@ -332,27 +332,33 @@ def create_app() -> App:
 
     # --- /coco-status slash command -------------------------------------------
     @app.command("/coco-status")
-    def handle_status(ack, body, client):
+    def handle_status(ack, respond, body):
         """Respond to /coco-status with bridge health info."""
+        ack()  # must ack within 3s — do it bare before any work
+        log.info("STATUS_CMD received user=%s", body.get("user_id", "?"))
         user = body.get("user_id", "")
         if user != target_user:
-            ack(text="Unauthorized.")
+            respond(text="Unauthorized.")
             return
-        ack(text=_build_status_response())
+        try:
+            respond(text=_build_status_response())
+        except Exception as exc:
+            log.error("STATUS_CMD failed: %s", exc)
+            respond(text="Error building status response.")
 
     # --- /coco-launch slash command -------------------------------------------
     @app.command("/coco-launch")
-    def handle_launch(ack, body, client):
+    def handle_launch(ack, respond, body, client):
         """Launch a new headless Cortex Code session in a tmux window.
 
         Usage: /coco-launch [path]
         If path is omitted, defaults to the user's home directory.
         """
+        ack()  # ack immediately before any work
         user = body.get("user_id", "")
         if user != target_user:
-            ack(text="Unauthorized.")
+            respond(text="Unauthorized.")
             return
-        ack()
 
         raw_path = body.get("text", "").strip() or "~"
         expanded = os.path.expanduser(raw_path)
