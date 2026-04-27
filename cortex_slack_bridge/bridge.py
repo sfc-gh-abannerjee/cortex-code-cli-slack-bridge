@@ -126,10 +126,11 @@ def create_app() -> App:
     """Create and configure the Slack Bolt app."""
     app = App(token=get_bot_token())
     target_user = get_user_id()
+    _seen_ts: set[str] = set()  # dedup Socket Mode duplicate deliveries
 
     # --- DM listener -----------------------------------------------------------
     @app.event("message")
-    def handle_dm(event, say):
+    def handle_dm(event, client):
         """Capture DMs from the target user and write to inbox."""
         # Only process messages from our user (ignore bot's own messages)
         user = event.get("user")
@@ -139,6 +140,13 @@ def create_app() -> App:
 
         text = event.get("text", "")
         ts = event.get("ts", "")
+        channel = event.get("channel", "")
+
+        # Deduplicate: Socket Mode can deliver the same event twice
+        if ts in _seen_ts:
+            return
+        _seen_ts.add(ts)
+
         log.info("DM received from %s: %s", user, text[:80])
 
         sid = get_active_session()
@@ -154,7 +162,16 @@ def create_app() -> App:
         if ts:
             set_last_ts(sid, ts)
 
-        say("Message sent to CoCo CLI. Awaiting response... please wait :dash_board:")
+        # Use client.chat_postMessage directly — say() triggers Bolt's assistant
+        # context store for thread replies and throws KeyError: 'channel_id'
+        if channel:
+            try:
+                client.chat_postMessage(
+                    channel=channel,
+                    text="Message sent to CoCo CLI. Awaiting response... please wait :dash_board:",
+                )
+            except Exception as e:
+                log.warning("Failed to send ack message: %s", e)
 
     # --- Button action handlers ------------------------------------------------
     @app.action("confirm_approve")

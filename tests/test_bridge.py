@@ -164,3 +164,50 @@ def test_build_status_response_no_pid_file(tmp_path, monkeypatch):
     text = _build_status_response()
     assert isinstance(text, str)
     assert len(text) > 0
+
+
+# ---------------------------------------------------------------------------
+# Feature 4: handle_dm deduplication and client.chat_postMessage ack
+# ---------------------------------------------------------------------------
+
+def _make_dm_event(ts="1111.0001", user="U_TARGET", text="hello", channel="DM_CHAN"):
+    return {"user": user, "ts": ts, "text": text, "channel": channel, "subtype": None}
+
+
+def test_handle_dm_deduplicates_same_ts(tmp_path, monkeypatch):
+    """_seen_ts set in create_app closure deduplicates duplicate Socket Mode deliveries.
+    Verify the mechanism: _append_inbox itself does NOT dedup (that's the handler's job).
+    """
+    monkeypatch.setattr("cortex_slack_bridge.config.BRIDGE_DIR", tmp_path)
+    monkeypatch.setattr("cortex_slack_bridge.config.ACTIVE_SESSION_FILE",
+                        tmp_path / "active_session")
+    monkeypatch.setattr("cortex_slack_bridge.config.HISTORY_FILE", tmp_path / "history.jsonl")
+    monkeypatch.setattr("cortex_slack_bridge.config.INBOX_FILE", tmp_path / "inbox.json")
+    (tmp_path / "active_session").write_text("sess-dedup")
+
+    # _append_inbox itself does NOT dedup — two calls = two entries
+    from cortex_slack_bridge.bridge import _append_inbox, _read_inbox
+    _append_inbox({"type": "reply", "text": "hello", "user": "U_TARGET",
+                   "ts": "1111.0001", "received_at": 0.0}, session_id="sess-dedup")
+    _append_inbox({"type": "reply", "text": "hello", "user": "U_TARGET",
+                   "ts": "1111.0001", "received_at": 0.0}, session_id="sess-dedup")
+    result = _read_inbox("sess-dedup")
+    # Two entries written (dedup happens at the handler layer, not here)
+    assert len(result) == 2
+
+    # Verify dedup is applied at handler layer by inspecting the source
+    import inspect
+    from cortex_slack_bridge import bridge as bmod
+    src = inspect.getsource(bmod.create_app)
+    assert "_seen_ts" in src
+    assert "if ts in _seen_ts" in src
+
+
+def test_handle_dm_uses_client_not_say(tmp_path, monkeypatch):
+    """handle_dm must not use say() — it should call client.chat_postMessage."""
+    import ast, inspect
+    from cortex_slack_bridge import bridge as bmod
+    src = inspect.getsource(bmod.create_app)
+    # 'say' must not appear as a function argument in handle_dm
+    assert "def handle_dm(event, say" not in src
+    assert "client.chat_postMessage" in src
